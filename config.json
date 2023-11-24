@@ -1,0 +1,20 @@
+{
+    "local_paths": {
+        "json": "/home/ann/json",
+        "video": "/home/ann/content",
+        "html": "/home/ann/content",
+        "img": "/home/ann/img"
+    },
+    "url_templates": {
+        "metadata": "https://news.tv-asahi.co.jp/api/newslist.php?appcode=n4tAMkmEnY&category_id=%d&page=%s&kind=all",
+        "html": "https://news.tv-asahi.co.jp/%s/articles/%s.html"
+    },
+    "categories": {
+        "news_politics": 1,
+        "news_economy": 2,
+        "news_society": 3,
+        "news_international": 4,
+        "news_geinou": 11
+    },
+    "curl_proxy": "socks5h://127.0.0.1:8073"
+}

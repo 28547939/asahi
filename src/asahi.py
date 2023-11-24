@@ -16,6 +16,7 @@ import asyncio, aiohttp
 
 from typing import List, Tuple, Any, Optional, Dict
 
+from datetime import datetime
 
 """
 The relevant data for an article consists of four components:
@@ -23,7 +24,7 @@ The relevant data for an article consists of four components:
 
 
 JSON metadata for each article are fetched first using the website's 
-exposed REST API and saved to a single file. Then this program is used
+exposed HTTP API and saved to a single (concatenated) file. Then this program is used
 to fetch content as desired.
 
 Dependencies in fetching the data:
@@ -41,13 +42,6 @@ article HTML
 In theory the article HTML can be discarded after data is extracted.
 
 
-
-the JSON metadata is fetched separately using a shell script and stored in a file/files.
-     TODO this will be done with Python
-
-then this program is used to fetch the remaining components of the data, and the article
-    metadata and text are stored in DyanamoDB.
-
 Currently there is no mechanism to fetch the metadata from the DB for the purpose of downloading
 the other data components (though this could be integrated into the article_metadata class).
 So for now the intended flow is for all the desired data to be downloaded using the on-disk
@@ -59,6 +53,7 @@ JSON reference data
 """
 TODO
 - structured logging, or at least a mechanism to collect errors and report at the end of the operation
+- function decorator to indicate required dependencies 
 """
 
 
@@ -77,9 +72,19 @@ global_config={}
             #        print(repr(e.response))
 
 
+# article metadata is just JSON that has been downloaded from the website's REST endpoint.
+# it's downloaded in pages, which each page response being a JSON object containing an array
+# articles (JSON objects representing articles) in the page.
+# download_metadata removes the rest of the object, leaving the list of article objects,
+# and concatenates the pages.
+# 
+# `load` loads a processed document (JSON list of article metadata objects) from disk
+#   for use with all the download functions except download_metadata
+# `load_metadata_page` loads an un-processed page document (also from disk)
+#   for use with download_metadata
 class article_metadata():
-    def __init__(self, json_dir, category):
-        self.json_dir=json_dir
+    def __init__(self, json_dir, subdir, category):
+        self.json_dir=os.path.join(json_dir, subdir)
         self.category=category
         self.data={}
 
@@ -88,7 +93,7 @@ class article_metadata():
             cond=lambda x: True
 
         try:
-            with open(os.path.join(self.json_dir, self.category+'.json'), 'r') as f:
+            with open(os.path.join(self.json_dir, self.category, self.category+'.json'), 'r') as f:
                 data=json.load(f)
                 pending={ v['article_no']: v for v in data }
 
@@ -99,10 +104,9 @@ class article_metadata():
             print(e)
             return
 
-    def load_manual(self, md_entry):
-        self.data[md_entry['article_no']]=md_entry
+    #def load_manual(self, md_entry):
+    #    self.data[md_entry['article_no']]=md_entry
 
-  
     def read(self):
         for x in self.data.values():
             yield x
@@ -113,6 +117,14 @@ class article_metadata():
     def __repr__(self):
         return str(self.data.keys())
  
+class aws_session():
+    def __init__(self, profile_name):
+        self.session = boto3.Session(profile_name=profile_name)
+        self.db_client=self.session.client('dynamodb')
+        self.db_rsrc=self.session.resource('dynamodb')
+
+        self.metadata_tbl_name='asahi-metadata'
+        self.article_tbl_name='asahi-content'
 
 
 class Asahi():
@@ -120,34 +132,47 @@ class Asahi():
         categories : dict, 
         local_paths: dict,
         url_templates : dict,
-        curl_proxy=None
+        aws_session=None,
+        curl_proxy=None,
+        quiet=False,
     ):
 
         self.url_templates = url_templates
         self.categories = categories
         self.curl_proxy = curl_proxy
+        self.quiet = quiet
+        self.aws_session = aws_session 
 
         for x in ['json', 'html', 'video', 'img']: 
             k=x + '_dir'
-            setattr(self, k, local_paths[k] if k in local_paths else None)
+            setattr(self, k, local_paths[x] if x in local_paths else None)
+
+    def log(self, msg):
+        if not self.quiet:
+            print(msg)
 
 
+    # try to load one page of metadata
+    def load_metadata_page(self, path, item_key='item'):
+        with open(path, 'r') as f:
+            data=json.load(f)
+            if data['article_count'] == 0 or not item_key in data:
+                self.log(f'article_metadata.load_metadata_page: no articles found, returning None ({path})')
+                return None
 
+            return data
 
-
-#ddb=session.client('dynamodb', config=conf)
-        self.session = boto3.Session(profile_name='ann')
-        self.db_client=self.session.client('dynamodb')
-        self.db_rsrc=self.session.resource('dynamodb')
-
-    def create_tables(self, delete_existing):
+    async def create_tables(self, delete_existing):
+        aws_session=self.aws_session
+        mtbl=aws_session.metadata_tbl_name
+        atbl=aws_session.article_tbl_name
 
         if delete_existing == True:
-            for t in ['asahi-metadata', 'asahi-content']:
+            for t in [mtbl, atbl]:
                 try:
-                    self.db_client.delete_table(TableName=t)
+                    aws_session.db_client.delete_table(TableName=t)
                     print(f'waiting for deletion of {t}')
-                    self.db_client.get_waiter('table_not_exists').wait(TableName=t)
+                    aws_session.db_client.get_waiter('table_not_exists').wait(TableName=t)
                 except botocore.exceptions.ClientError as e:
                     if e.response['Error']['Code'] == 'ResourceNotFoundException':
                         pass
@@ -155,27 +180,28 @@ class Asahi():
                         print(repr(e.response))
 
 
-        self.db_client.create_table(
-            TableName='asahi-metadata',
+                # TODO  dynamodb global secondary index on update_time, category
+                #{
+                #     'AttributeName': 'update_time',
+                #    'AttributeType': 'N',
+                #},
+
+        aws_session.db_client.create_table(
+            TableName=aws_session.metadata_tbl_name,
             AttributeDefinitions=[
                 {
                     'AttributeName': 'article_no',
                     'AttributeType': 'S',
                 },
-                {
-                    'AttributeName': 'update_time',
-                    'AttributeType': 'N',
-                },
             ],
             KeySchema=[
                 { 'AttributeName': 'article_no', 'KeyType': 'HASH', },
-                { 'AttributeName': 'update_time', 'KeyType': 'RANGE', }
             ],
             BillingMode='PAY_PER_REQUEST'
         )
 
-        self.db_client.create_table(
-            TableName='asahi-content',
+        aws_session.db_client.create_table(
+            TableName=aws_session.article_tbl_name,
             AttributeDefinitions=[
                 {
                     'AttributeName': 'article_no',
@@ -189,14 +215,13 @@ class Asahi():
         )
 
         print('waiting for table creation')
-        self.db_client.get_waiter('table_exists').wait(TableName='asahi-metadata')
-        self.db_client.get_waiter('table_exists').wait(TableName='asahi-content')
+        aws_session.db_client.get_waiter('table_exists').wait(TableName='asahi-metadata')
+        aws_session.db_client.get_waiter('table_exists').wait(TableName='asahi-content')
 
 
-    def download_metadata(self, category):
-        pass
+        
 
-
+    # TODO async
     def _dl(self, url, to_file=None):
         args=[ 'curl' ]
 
@@ -222,10 +247,16 @@ class Asahi():
 
     dst_dir needs to be the actual destination directory including the category name
     (if applicable)
+
+    url_f provides the URL, given the article_metadata object and the article ID
     """
     async def _generic_downloader(self, md : article_metadata, dst_dir, url_f, sleep_time=5):
-        for metadata_item in md.read():
+        items=md.read()
+        nonempty=None
+
+        for metadata_item in items:
             article_id=metadata_item['article_no']
+            nonempty=True
 
             url=url_f(md, article_id)
             if url is None:
@@ -253,7 +284,84 @@ class Asahi():
 
             print(f'{article_id}: completed download {url} -> {dst_path}')
 
+
             await asyncio.sleep(sleep_time)
+
+        if not nonempty:
+            self.log('_generic_downloader: no entries present in the article_metadata object')
+
+
+
+    async def download_metadata(self, category, sleep_time=5, item_key='item'):
+        datestr=datetime.now().isoformat()
+        json_dir=os.path.join(self.json_dir, datestr, category)
+
+        try:
+            os.makedirs(json_dir)
+        except FileExistsError:
+            pass
+
+        items_key='item'
+
+        def path(page):
+            return os.path.join(json_dir, ('page%04d' % page) + '.json')
+
+        def url(page):
+            page_str='%04d' % page
+            return (self.url_templates['metadata'] % (self.categories[category], page_str))
+
+        def do_dl(page):
+            a=url(page)
+            b=path(page)
+            self.log(f'download_metadata: downloading {a} -> {b}')
+            self._dl(a, to_file=b)
+
+        def prune_existing(loaded_page):
+            # optimization would be to iterate manually and break once an existing one is found,
+            # assuming they are ordered in time
+            return list(itertools.filterfalse(
+                lambda item: self.fetch_article(item['article_no']) is not None,
+                loaded_page[item_key],
+            ))
+
+        concatenated=[]
+
+        # check content of first page of metadata to get total number of pages
+        do_dl(1)
+        current_page=self.load_metadata_page(path(1))
+        max_page=current_page['max_page']
+
+        pruned=prune_existing(current_page)
+        concatenated=pruned
+
+        self.log(f'will download at most {max_page} total pages')
+
+
+        for i in range(2, max_page + 1):
+            # if we have encountered an existing article (whether in page 1 above, or
+            # while iterating in the loop), we break, since we assume that we have
+            # the articles in all subsequent pages
+            if len(pruned) != len(current_page[item_key]):
+                break
+
+            do_dl(i)
+            path_i=path(i)
+            current_page=self.load_metadata_page(path_i)
+
+            pruned=prune_existing(current_page)
+            concatenated.extend(pruned)
+
+            await asyncio.sleep(sleep_time)
+
+        out_path=os.path.join(json_dir, f'{category}.json')
+        if len(concatenated) == 0:
+            self.log(f'no new records (not writing metadata file to {datestr}')
+            return
+
+        with open(out_path, 'w') as f:
+            json.dump(concatenated, f, indent=4, ensure_ascii=False)
+            self.log(f'wrote full metadata file to {out_path} (subdir is {datestr})')
+
 
 
     """
@@ -280,7 +388,7 @@ class Asahi():
 
     async def download_articles_html(self, md : article_metadata, sleep_time=5):
         def f(md, article_id):
-                url = self.url_template['html'] % (md.category, article_id)
+                url = self.url_templates['html'] % (md.category, article_id)
                 return url
 
         html_dir=os.path.join(self.html_dir, md.category)
@@ -347,16 +455,16 @@ class Asahi():
         (1) Read in article's HTML file and extract the article contents
         (2) Insert the metadata and article contents as JSON
     """
-    def store_articles(self, md : article_metadata):
-        metadata_tbl=self.db_rsrc.Table('asahi-metadata')
-        content_tbl=self.db_rsrc.Table('asahi-content')
+    async def store_articles(self, md : article_metadata):
+        metadata_tbl=self.aws_session.db_rsrc.Table(self.aws_session.metadata_tbl_name)
+        article_tbl=self.aws_session.db_rsrc.Table(self.aws_session.article_tbl_name)
 
-        strkeys=['update_time','category_id']
 
         for metadata_item in md.read():
             print('processing %s' % metadata_item['article_no'])
 
-            for k in strkeys:
+            # convert these entries from str to int
+            for k in ['update_time','category_id']:
                 metadata_item[k]=int(metadata_item[k])
 
             article_id=metadata_item['article_no']
@@ -370,15 +478,28 @@ class Asahi():
                 print(f'store_articles: parse_article_html returned None for {article_id}, skipping')
                 continue
 
-
             metadata_tbl.put_item(
                 Item=metadata_item,
             )
 
             data['article_no']=article_id
-            content_tbl.put_item(
+            article_tbl.put_item(
                 Item=data
             )
 
- 
+
+    def fetch_article(self, article_no):
+        try:
+            return self.aws_session.db_rsrc.Table(
+                self.aws_session.metadata_tbl_name,
+            ).get_item(
+                Key={
+                    'article_no': article_no
+                },
+            )
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                return None
+            else:
+                raise e
 
