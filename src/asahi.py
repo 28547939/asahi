@@ -253,6 +253,7 @@ class Asahi():
     async def _generic_downloader(self, md : article_metadata, dst_dir, url_f, sleep_time=5):
         items=md.read()
         nonempty=None
+        failed=[]
 
         for metadata_item in items:
             article_id=metadata_item['article_no']
@@ -280,12 +281,20 @@ class Asahi():
                 self._dl(url, to_file=dst_path)
             except Exception as e:
                 print(f'failed for {article_id}({url}): {e}')
+                failed.append(article_id)
                 continue
 
             print(f'{article_id}: completed download {url} -> {dst_path}')
 
 
             await asyncio.sleep(sleep_time)
+
+        if self.verbose:
+            print('download completed. begin list of failed article IDs')
+            for x in failed:
+                print(x)
+
+            print('end list of article IDs which failed to download')
 
         if not nonempty:
             self.log('_generic_downloader: no entries present in the article_metadata object')
