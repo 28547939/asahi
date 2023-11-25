@@ -26,10 +26,6 @@ handler_keys=[
 handlers = { k: None for k in handler_keys }
 
 
-#obj.create_tables()
-
-#obj.store_articles(md)
-
 async def main():
 
     prs=argparse.ArgumentParser(
@@ -61,6 +57,7 @@ async def main():
         subprs_inst[cmd]=sp
 
     # add any command-specific arguments here by looking the command up in subprs_inst
+    #   ...
 
     args=vars(prs.parse_args())
 
@@ -84,6 +81,7 @@ async def main():
     obj=asahi.Asahi(categories, local_paths, url_templates, aws_session, curl_proxy, quiet)
 
 
+    # our processing uses existing (previously downloaded) on-disk metadata except for two commands
     if cmd not in [ 'download-metadata', 'delete-create-tables' ]:
         md=asahi.article_metadata(local_paths['json'], args['metadata_subdir'], args['category'])
         md.load()
