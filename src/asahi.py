@@ -24,8 +24,8 @@ The relevant data for an article consists of four components:
 
 
 JSON metadata for each article are fetched first using the website's 
-exposed HTTP API and saved to a single (concatenated) file. Then this program is used
-to fetch content as desired.
+exposed HTTP API and saved to a single (concatenated) file using the download_metadata
+function/command. Then other commands are used to download other data as desired.
 
 Dependencies in fetching the data:
 
@@ -36,16 +36,15 @@ JSON metadata
 
 article HTML
     => article image (URL)
-    => article text
+    => article text (contained in JSON+LD data in a <script> tag)
 
 
 In theory the article HTML can be discarded after data is extracted.
 
-
 Currently there is no mechanism to fetch the metadata from the DB for the purpose of downloading
 the other data components (though this could be integrated into the article_metadata class).
 So for now the intended flow is for all the desired data to be downloaded using the on-disk
-JSON reference data
+JSON reference data (that reference data having already been downloaded using download_metadata)
 
 """
 
@@ -55,21 +54,6 @@ TODO
 - structured logging, or at least a mechanism to collect errors and report at the end of the operation
 - function decorator to indicate required dependencies 
 """
-
-
-# see program setup at the end
-global_config={}
-
-            #try: 
-            #    metadata_tbl.get_item(
-            #        TableName='asahi-metadata',
-            #        Key={ 'article_no': { 'S': article_id } }
-            #    )
-            #except botocore.exceptions.ClientError as e:
-            #    if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            #        pass
-            #    else:
-            #        print(repr(e.response))
 
 
 # article metadata is just JSON that has been downloaded from the website's REST endpoint.
@@ -289,12 +273,12 @@ class Asahi():
 
             await asyncio.sleep(sleep_time)
 
-        if self.verbose:
-            print('download completed. begin list of failed article IDs')
+        if self.verbose && len(failed) > 0:
+            print('download completed. begin list of article IDs for which download failed')
             for x in failed:
                 print(x)
 
-            print('end list of article IDs which failed to download')
+            print('end list of article IDs for which download failed')
 
         if not nonempty:
             self.log('_generic_downloader: no entries present in the article_metadata object')
@@ -327,7 +311,7 @@ class Asahi():
 
         def prune_existing(loaded_page):
             # optimization would be to iterate manually and break once an existing one is found,
-            # assuming they are ordered in time
+            # assuming they are ordered in time (we do assume that)
             return list(itertools.filterfalse(
                 lambda item: self.fetch_article(item['article_no']) is not None,
                 loaded_page[item_key],
