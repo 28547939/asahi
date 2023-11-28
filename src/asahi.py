@@ -273,7 +273,7 @@ class Asahi():
 
             await asyncio.sleep(sleep_time)
 
-        if self.verbose && len(failed) > 0:
+        if self.verbose and len(failed) > 0:
             print('download completed. begin list of article IDs for which download failed')
             for x in failed:
                 print(x)
@@ -403,8 +403,8 @@ class Asahi():
         await self._generic_downloader(md, video_dir, f, sleep_time=sleep_time)
 
 
-    #
-    def parse_article_html(self, path):
+    @staticmethod
+    def parse_article_html(path):
         try:
             os.stat(path)
         except FileNotFoundError:
