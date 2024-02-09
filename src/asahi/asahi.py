@@ -81,7 +81,7 @@ class article_metadata():
                 data=json.load(f)
                 pending={ v['article_no']: v for v in data }
 
-                pending=dict(itertools.filterfalse(lambda x: not cond(x[1]), pending.items()))
+                pending=dict(filter(lambda x: cond(x[1]), pending.items()))
                 self.data.update(pending)
 
         except Exception as e:
@@ -116,7 +116,7 @@ class Asahi():
         categories : dict, 
         local_paths: dict,
         url_templates : dict,
-        aws_session=None,
+        aws_profile=None,
         curl_proxy=None,
         quiet=False,
     ):
@@ -125,7 +125,12 @@ class Asahi():
         self.categories = categories
         self.curl_proxy = curl_proxy
         self.quiet = quiet
-        self.aws_session = aws_session 
+        self.aws_profile=aws_profile
+
+# TODO lazy load aws session
+
+        if aws_profile:
+            self.aws_session = aws_session(aws_profile)
 
         for x in ['json', 'html', 'video', 'img']: 
             k=x + '_dir'
@@ -273,7 +278,7 @@ class Asahi():
 
             await asyncio.sleep(sleep_time)
 
-        if self.verbose and len(failed) > 0:
+        if len(failed) > 0:
             print('download completed. begin list of article IDs for which download failed')
             for x in failed:
                 print(x)
@@ -286,8 +291,12 @@ class Asahi():
 
 
     async def download_metadata(self, category, sleep_time=5, item_key='item'):
+        if category not in self.categories:
+            raise ValueError(f'unknown category {category}')
+
         datestr=datetime.now().isoformat()
-        json_dir=os.path.join(self.json_dir, datestr, category)
+        subdir=category+'_'+datestr
+        json_dir=os.path.join(self.json_dir, subdir, category)
 
         try:
             os.makedirs(json_dir)
@@ -312,8 +321,7 @@ class Asahi():
         def prune_existing(loaded_page):
             # optimization would be to iterate manually and break once an existing one is found,
             # assuming they are ordered in time (we do assume that)
-            return list(itertools.filterfalse(
-                lambda item: self.fetch_article(item['article_no']) is not None,
+            return list(filter(lambda item: self.fetch_article(item['article_no']) is None,
                 loaded_page[item_key],
             ))
 
@@ -334,7 +342,15 @@ class Asahi():
             # if we have encountered an existing article (whether in page 1 above, or
             # while iterating in the loop), we break, since we assume that we have
             # the articles in all subsequent pages
+            # but check the exact difference anyway to report to the user
             if len(pruned) != len(current_page[item_key]):
+                (a, b)=(
+                    set([ v['article_no'] for v in x ])
+                    for x in (pruned, current_page[item_key])
+                )
+                existing=a ^ b
+                self.log(f'found existing articles in page {i}, not downloading any further pages. ({existing})')
+
                 break
 
             do_dl(i)
@@ -348,12 +364,12 @@ class Asahi():
 
         out_path=os.path.join(json_dir, f'{category}.json')
         if len(concatenated) == 0:
-            self.log(f'no new records (not writing metadata file to {datestr}')
+            self.log(f'no new records (not writing metadata file to {datestr})')
             return
 
         with open(out_path, 'w') as f:
             json.dump(concatenated, f, indent=4, ensure_ascii=False)
-            self.log(f'wrote full metadata file to {out_path} (subdir is {datestr})')
+            self.log(f'wrote full metadata file to {out_path} (subdir is {subdir})')
 
 
 
@@ -444,14 +460,15 @@ class Asahi():
 
     
     """
-        Iterate over article metadata JSON previously saved by shell scripts
+        Iterate over article metadata JSON previously saved by the download-metadata
+        command, additionally reading the article contents (HTML) saved by the 
+        download-articles command.
         (1) Read in article's HTML file and extract the article contents
         (2) Insert the metadata and article contents as JSON
     """
     async def store_articles(self, md : article_metadata):
         metadata_tbl=self.aws_session.db_rsrc.Table(self.aws_session.metadata_tbl_name)
         article_tbl=self.aws_session.db_rsrc.Table(self.aws_session.article_tbl_name)
-
 
         for metadata_item in md.read():
             print('processing %s' % metadata_item['article_no'])
@@ -480,16 +497,22 @@ class Asahi():
                 Item=data
             )
 
+# TODO - add fetch_article to command, and incorporate sorting to get most recent article
 
-    def fetch_article(self, article_no):
+    async def fetch_article(self, article_no):
         try:
-            return self.aws_session.db_rsrc.Table(
+            resp=self.aws_session.db_rsrc.Table(
                 self.aws_session.metadata_tbl_name,
             ).get_item(
                 Key={
                     'article_no': article_no
                 },
             )
+
+            if 'Item' in resp:
+                return resp['Item']
+            else:
+                return None
         except botocore.exceptions.ClientError as e:
             if e.response['Error']['Code'] == 'ResourceNotFoundException':
                 return None

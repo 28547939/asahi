@@ -16,5 +16,6 @@
         "news_international": 4,
         "news_geinou": 11
     },
-    "curl_proxy": "socks5h://127.0.0.1:8073"
+    "curl_proxy": "socks5h://127.0.0.1:8073",
+    "aws_profile": "asahi"
 }

@@ -20,7 +20,8 @@ handler_keys=[
     'download-videos',
     'download-articles',
     'store-articles',
-    'delete-create-tables'
+    'delete-create-tables',
+    'fetch-article'
 ]
 
 handlers = { k: None for k in handler_keys }
@@ -48,10 +49,13 @@ async def main():
         sp = subprs.add_parser(cmd)
         sp.set_defaults(cmd=cmd)
 
-        if cmd != 'delete-create-tables':
+        if cmd not in ['delete-create-tables', 'fetch-article']:
             sp.add_argument('--category', required=True)
 
-        if cmd not in ['download-metadata', 'delete-create-tables']:
+        if cmd == 'fetch-article':
+            sp.add_argument('--article-id', required=True)
+
+        if cmd not in ['download-metadata', 'delete-create-tables', 'fetch-article']:
             sp.add_argument('--metadata-subdir', required=True)
 
         subprs_inst[cmd]=sp
@@ -65,10 +69,6 @@ async def main():
     sleep_time=args['sleep_time'] 
     quiet=args['quiet']
 
-    if 'aws_profile' in args:
-        aws_session=asahi.aws_session(args['aws_profile'])
-    else:
-        aws_session=None
 
     with open(args['config'], 'rb') as f:
         config=json.load(f)
@@ -77,12 +77,12 @@ async def main():
         local_paths=config['local_paths']
         url_templates=config['url_templates']
         curl_proxy=config['curl_proxy'] if 'curl_proxy' in config else None
+        aws_profile=config['aws_profile']
 
-    obj=asahi.Asahi(categories, local_paths, url_templates, aws_session, curl_proxy, quiet)
-
+    obj=asahi.Asahi(categories, local_paths, url_templates, aws_profile, curl_proxy, quiet)
 
     # our processing uses existing (previously downloaded) on-disk metadata except for two commands
-    if cmd not in [ 'download-metadata', 'delete-create-tables' ]:
+    if cmd not in [ 'download-metadata', 'delete-create-tables', 'fetch-article' ]:
         md=asahi.article_metadata(local_paths['json'], args['metadata_subdir'], args['category'])
         md.load()
 
@@ -104,12 +104,22 @@ async def main():
     async def create_tables(): 
         await obj.create_tables(True)
 
+    async def fetch_article(): 
+        article_no=args['article_id']
+        ret=await obj.fetch_article(article_no)
+        if ret is None:
+            print(f'article not found ({article_no})')
+        else:
+            print(ret)
+            
+
     handlers['download-metadata'] = download_metadata
     handlers['download-articles'] = download_articles
     handlers['download-images'] = download_images
     handlers['download-videos'] = download_videos
     handlers['store-articles'] = store_articles
     handlers['delete-create-tables'] = create_tables
+    handlers['fetch-article'] = fetch_article
 
     await handlers[cmd]()
 
