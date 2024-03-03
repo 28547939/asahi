@@ -58,13 +58,13 @@ TODO
 
 # article metadata is just JSON that has been downloaded from the website's REST endpoint.
 # it's downloaded in pages, which each page response being a JSON object containing an array
-# articles (JSON objects representing articles) in the page.
+# articles (JSON objects containing article metadata) in the page.
 # download_metadata removes the rest of the object, leaving the list of article objects,
 # and concatenates the pages.
 # 
 # `load` loads a processed document (JSON list of article metadata objects) from disk
 #   for use with all the download functions except download_metadata
-# `load_metadata_page` loads an un-processed page document (also from disk)
+# `load_raw_page`, below, loads an un-processed page document (also from disk)
 #   for use with download_metadata
 class article_metadata():
     def __init__(self, json_dir, subdir, category):
@@ -85,11 +85,18 @@ class article_metadata():
                 self.data.update(pending)
 
         except Exception as e:
-            print(e)
-            return
+            raise
 
-    #def load_manual(self, md_entry):
-    #    self.data[md_entry['article_no']]=md_entry
+    # try to load one page of metadata
+    @staticmethod
+    def load_raw_page(path, item_key='item'):
+        with open(path, 'r') as f:
+            data=json.load(f)
+            if data['article_count'] == 0 or not item_key in data:
+                self.log(f'article_metadata.load_metadata_page: no articles found, returning None ({path})')
+                return None
+
+            return data
 
     def read(self):
         for x in self.data.values():
@@ -127,8 +134,6 @@ class Asahi():
         self.quiet = quiet
         self.aws_profile=aws_profile
 
-# TODO lazy load aws session
-
         if aws_profile:
             self.aws_session = aws_session(aws_profile)
 
@@ -141,15 +146,6 @@ class Asahi():
             print(msg)
 
 
-    # try to load one page of metadata
-    def load_metadata_page(self, path, item_key='item'):
-        with open(path, 'r') as f:
-            data=json.load(f)
-            if data['article_count'] == 0 or not item_key in data:
-                self.log(f'article_metadata.load_metadata_page: no articles found, returning None ({path})')
-                return None
-
-            return data
 
     async def create_tables(self, delete_existing):
         aws_session=self.aws_session
@@ -204,13 +200,10 @@ class Asahi():
         )
 
         print('waiting for table creation')
-        aws_session.db_client.get_waiter('table_exists').wait(TableName='asahi-metadata')
-        aws_session.db_client.get_waiter('table_exists').wait(TableName='asahi-content')
+        aws_session.db_client.get_waiter('table_exists').wait(TableName=mtbl)
+        aws_session.db_client.get_waiter('table_exists').wait(TableName=atbl)
 
 
-        
-
-    # TODO async
     def _dl(self, url, to_file=None):
         args=[ 'curl' ]
 
@@ -232,7 +225,8 @@ class Asahi():
 
     """
     shared functionality among the downloaders for the different types of data
-    (images, html, video)
+    (images, html, video). 
+    JSON metadata is downloaded manually using _dl
 
     dst_dir needs to be the actual destination directory including the category name
     (if applicable)
@@ -240,11 +234,10 @@ class Asahi():
     url_f provides the URL, given the article_metadata object and the article ID
     """
     async def _generic_downloader(self, md : article_metadata, dst_dir, url_f, sleep_time=5):
-        items=md.read()
         nonempty=None
         failed=[]
 
-        for metadata_item in items:
+        for metadata_item in md.read():
             article_id=metadata_item['article_no']
             nonempty=True
 
@@ -258,6 +251,7 @@ class Asahi():
             except FileExistsError:
                 pass
 
+            # check if the destination file already exists
             dst_path=os.path.join(dst_dir, os.path.basename(url))
             try:
                 os.stat(dst_path)
@@ -274,8 +268,6 @@ class Asahi():
                 continue
 
             print(f'{article_id}: completed download {url} -> {dst_path}')
-
-
             await asyncio.sleep(sleep_time)
 
         if len(failed) > 0:
@@ -319,8 +311,9 @@ class Asahi():
             self._dl(a, to_file=b)
 
         def prune_existing(loaded_page):
-            # optimization would be to iterate manually and break once an existing one is found,
-            # assuming they are ordered in time (we do assume that)
+            # optimization would be to iterate in a loop and break once an existing one is found,
+            # since that signals that all articles in all further pages are existing
+            # (we assume the entire article list across all pages is ordered in time)
             return list(filter(lambda item: self.fetch_article(item['article_no']) is None,
                 loaded_page[item_key],
             ))
@@ -329,8 +322,11 @@ class Asahi():
 
         # check content of first page of metadata to get total number of pages
         do_dl(1)
-        current_page=self.load_metadata_page(path(1))
-        max_page=current_page['max_page']
+        current_page=article_metadata.load_metadata_page(path(1))
+        try:
+            max_page=current_page['max_page']
+        except KeyError:
+            raise Exception(f'malformed first page at {path(1)}: max_page key not present')
 
         pruned=prune_existing(current_page)
         concatenated=pruned
@@ -349,13 +345,13 @@ class Asahi():
                     for x in (pruned, current_page[item_key])
                 )
                 existing=a ^ b
-                self.log(f'found existing articles in page {i}, not downloading any further pages. ({existing})')
+                self.log(f'found existing articles in page {i}, not downloading any further pages. (existing={existing})')
 
                 break
 
             do_dl(i)
             path_i=path(i)
-            current_page=self.load_metadata_page(path_i)
+            current_page=article_metadata.load_metadata_page(path_i)
 
             pruned=prune_existing(current_page)
             concatenated.extend(pruned)
@@ -497,22 +493,37 @@ class Asahi():
                 Item=data
             )
 
-# TODO - add fetch_article to command, and incorporate sorting to get most recent article
-
+    # TODO  incorporate sorting to get most recent article
     async def fetch_article(self, article_no):
         try:
-            resp=self.aws_session.db_rsrc.Table(
-                self.aws_session.metadata_tbl_name,
-            ).get_item(
+            metadata_tbl=self.aws_session.db_rsrc.Table(self.aws_session.metadata_tbl_name)
+            article_tbl=self.aws_session.db_rsrc.Table(self.aws_session.article_tbl_name)
+
+            metadata=metadata_tbl.get_item(
                 Key={
                     'article_no': article_no
                 },
             )
 
-            if 'Item' in resp:
-                return resp['Item']
-            else:
-                return None
+            article=article_tbl.get_item(
+                Key={
+                    'article_no': article_no
+                },
+            )
+
+            ret = {}
+
+            def f (resp, k):
+                if 'Item' in resp:
+                    ret[k]=resp['Item']
+                else:
+                    print(f'warning: `Item` key not present in response ({resp})')
+
+            f(metadata, 'metadata'),
+            f(article, 'article')
+
+            return ret
+
         except botocore.exceptions.ClientError as e:
             if e.response['Error']['Code'] == 'ResourceNotFoundException':
                 return None

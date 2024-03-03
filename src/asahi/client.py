@@ -1,7 +1,7 @@
 #!/usr/local/bin/python3.9
 
 import json
-import os
+import os, sys
 import itertools
 import argparse
 import subprocess
@@ -9,6 +9,7 @@ import subprocess
 import asyncio
 
 from typing import List, Tuple, Any, Optional, Dict
+import decimal
 
 
 import asahi
@@ -105,12 +106,20 @@ async def main():
         await obj.create_tables(True)
 
     async def fetch_article(): 
+        class J(json.JSONEncoder):
+            def default(self, x):
+                if isinstance(x, decimal.Decimal):
+                    return float(x)
+
+                return super().default(x)
+
+
         article_no=args['article_id']
         ret=await obj.fetch_article(article_no)
         if ret is None:
             print(f'article not found ({article_no})')
         else:
-            print(ret)
+            json.dump(ret, sys.stdout, indent=4, cls=J, ensure_ascii=False)
             
 
     handlers['download-metadata'] = download_metadata
