@@ -4,7 +4,6 @@ import boto3
 from botocore.config import Config
 import botocore.exceptions 
 
-import pdb
 import json
 import os
 import itertools
