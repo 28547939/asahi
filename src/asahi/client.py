@@ -82,7 +82,7 @@ async def main():
 
     obj=asahi.Asahi(categories, local_paths, url_templates, aws_profile, curl_proxy, quiet)
 
-    # our processing uses existing (previously downloaded) on-disk metadata except for two commands
+    # our processing uses existing (previously downloaded) on-disk metadata except for these commands
     if cmd not in [ 'download-metadata', 'delete-create-tables', 'fetch-article' ]:
         md=asahi.article_metadata(local_paths['json'], args['metadata_subdir'], args['category'])
         md.load()
