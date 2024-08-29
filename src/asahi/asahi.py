@@ -92,7 +92,7 @@ class article_metadata():
         with open(path, 'r') as f:
             data=json.load(f)
             if data['article_count'] == 0 or not item_key in data:
-                self.log(f'article_metadata.load_metadata_page: no articles found, returning None ({path})')
+                self.log(f'article_metadata.load_raw_page: no articles found, returning None ({path})')
                 return None
 
             return data
@@ -281,12 +281,15 @@ class Asahi():
 
 
 
-    async def download_metadata(self, category, sleep_time=5, item_key='item'):
+    async def download_metadata(self, category, sleep_time=5, item_key='item', metadata_subdir=None):
         if category not in self.categories:
             raise ValueError(f'unknown category {category}')
 
-        datestr=datetime.now().isoformat()
-        subdir=category+'_'+datestr
+        if metadata_subdir is None:
+            datestr=datetime.now().isoformat()
+            subdir=category+'_'+datestr
+        else:
+            subdir=metadata_subdir
         json_dir=os.path.join(self.json_dir, subdir, category)
 
         try:
@@ -321,7 +324,7 @@ class Asahi():
 
         # check content of first page of metadata to get total number of pages
         do_dl(1)
-        current_page=article_metadata.load_metadata_page(path(1))
+        current_page=article_metadata.load_raw_page(path(1))
         try:
             max_page=current_page['max_page']
         except KeyError:
@@ -350,7 +353,7 @@ class Asahi():
 
             do_dl(i)
             path_i=path(i)
-            current_page=article_metadata.load_metadata_page(path_i)
+            current_page=article_metadata.load_raw_page(path_i)
 
             pruned=prune_existing(current_page)
             concatenated.extend(pruned)
@@ -493,7 +496,7 @@ class Asahi():
             )
 
     # TODO  incorporate sorting to get most recent article
-    async def fetch_article(self, article_no):
+    def fetch_article(self, article_no):
         try:
             metadata_tbl=self.aws_session.db_rsrc.Table(self.aws_session.metadata_tbl_name)
             article_tbl=self.aws_session.db_rsrc.Table(self.aws_session.article_tbl_name)
@@ -506,26 +509,30 @@ class Asahi():
 
             article=article_tbl.get_item(
                 Key={
-                    'article_no': article_no
+                    'article_no': article_no 
                 },
             )
 
             ret = {}
 
             def f (resp, k):
-                if 'Item' in resp:
-                    ret[k]=resp['Item']
-                else:
-                    print(f'warning: `Item` key not present in response ({resp})')
+                nonlocal ret
+                if ret is not None:
+                    if 'Item' in resp:
+                        ret[k]=resp['Item']
+                    else:
+                        #print(f'warning: `Item` key not present in response for article {article_no} ({resp})')
+                        ret=None
 
-            f(metadata, 'metadata'),
+            f(metadata, 'metadata')
             f(article, 'article')
 
             return ret
 
         except botocore.exceptions.ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                return None
-            else:
-                raise e
+            raise e
+            #if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            #    return None
+            #else:
+            #    raise e
 

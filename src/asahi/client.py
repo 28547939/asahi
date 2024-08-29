@@ -59,6 +59,10 @@ async def main():
         if cmd not in ['download-metadata', 'delete-create-tables', 'fetch-article']:
             sp.add_argument('--metadata-subdir', required=True)
 
+        # allow user to specify their own metadata subdir (eg for scripting)
+        if cmd == 'download-metadata':
+            sp.add_argument('--metadata-subdir', required=False)
+
         subprs_inst[cmd]=sp
 
     # add any command-specific arguments here by looking the command up in subprs_inst
@@ -88,7 +92,7 @@ async def main():
         md.load()
 
     async def download_metadata(): 
-        await obj.download_metadata(args['category'], sleep_time)
+        await obj.download_metadata(args['category'], sleep_time, metadata_subdir=args['metadata_subdir'])
 
     async def download_articles(): 
         await obj.download_articles_html(md, sleep_time)
